@@ -9,13 +9,14 @@ Glitch's flagship multi-bot ensemble, combining Oracle coordination with the six
 ![Architecture](https://img.shields.io/badge/architecture-Oracle%20%2B%20Six%20Snakes-1d4ed8?style=for-the-badge)
 ![Family](https://img.shields.io/badge/family-Glitch%20Ecosystem-7c3aed?style=for-the-badge)
 
-[![Glitch Trading Core](https://img.shields.io/badge/Umbrella-Glitch%20Trading%20Core-111827?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-trading-core)
-[![Indian King Cobra](https://img.shields.io/badge/Satellite-Indian%20King%20Cobra-0f766e?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-indian-king-cobra)
-[![Terciopelo](https://img.shields.io/badge/Satellite-Terciopelo-1d4ed8?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-terciopelo)
+[![Hub](https://img.shields.io/badge/Hub-Glitch%20Trading%20Core-111827?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-trading-core)
+[![Flagship](https://img.shields.io/badge/Flagship-Ouroboros%20Snake%20Strategy-0f766e?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-ouroboros-snake-strategy)
+[![Satellite](https://img.shields.io/badge/Satellite-Indian%20King%20Cobra-1d4ed8?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-indian-king-cobra)
+[![Satellite](https://img.shields.io/badge/Satellite-Terciopelo-7c3aed?style=for-the-badge&logo=github)](https://github.com/glitch-executor/glitch-terciopelo)
 
 </div>
 
-## What Ouroboros Is
+## Repo Role
 
 Ouroboros Snake Strategy is the flagship coordinated Glitch ensemble.
 
@@ -28,6 +29,14 @@ It combines:
 - `mamba.py`
 - `anaconda.py`
 - `hydra.py`
+
+## Part Of The Glitch Ecosystem
+
+It sits alongside:
+
+- [Glitch Trading Core](https://github.com/glitch-executor/glitch-trading-core) as the umbrella architecture repo
+- [Indian King Cobra](https://github.com/glitch-executor/glitch-indian-king-cobra) as the standalone unified momentum scalper
+- [Terciopelo](https://github.com/glitch-executor/glitch-terciopelo) as the standalone equities relative-value strategy
 
 ## Why It Exists
 
