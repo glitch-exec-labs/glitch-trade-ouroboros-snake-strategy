@@ -5,6 +5,8 @@ venv/
 env/
 .env
 .env.*
+# exception: keep the template checked in
+!.env.example
 logs/
 ml_data/
 models/
