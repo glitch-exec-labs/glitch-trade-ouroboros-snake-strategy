@@ -8,6 +8,9 @@ env/
 logs/
 ml_data/
 models/
+# exception: vendored strategy model modules for the ctrader stack
+!ctrader/ensemble/models/
+!ctrader/ensemble/models/**
 *.log
 *.state.json
 *_state.json
