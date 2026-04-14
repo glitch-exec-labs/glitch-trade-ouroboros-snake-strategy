@@ -131,6 +131,13 @@ The best public contributions here are documentation clarity, sanitized examples
 - [MT5 Track](./mt5/README.md)
 - [cTrader Track](./ctrader/README.md)
 
+## Maintainer And Contact
+
+Glitch Executor is developed and maintained by Tejas Karan Agrawal, operating under the business name Nuraveda.
+
+- Support and responsible disclosure: `support@glitchexecutor.com`
+- Registered address: `77 Huntley St, Toronto, ON M4Y 2P3, Canada`
+
 ## License
 
 Released under [Apache 2.0](./LICENSE) with attribution preserved through [NOTICE](./NOTICE).
