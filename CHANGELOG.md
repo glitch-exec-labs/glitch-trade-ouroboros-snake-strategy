@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — 2026-04-14 · ML data is now server-local, not git-synced
+
+Previously the daily `glitch-ml-gitsync.service` pushed
+`ml_data_clean/**` CSVs to a companion ml-data GitHub repo. That flow
+is retired. Rationale:
+
+- The authoritative live data already lives in PostgreSQL on the server.
+- The earlier companion-repo content was from the MT5-era run; mixing
+  it with clean-account cTrader-era data in the same repo muddies ML
+  training inputs.
+- Keeping the CSV history off GitHub avoids needing to redact trade
+  volumes, account IDs, and balances on every push.
+
+New shape (server only):
+
+```
+/opt/ml/
+├── historical/             # frozen MT5-era archive (moved from clone)
+│   ├── per-bot/
+│   ├── research/
+│   └── clean-apr11-12/     # 2-day partial from the retired collector
+└── live/                   # cTrader-era, daily exports from PostgreSQL
+    └── YYYY-MM-DD/
+        ├── signals-YYYY-MM-DD.csv
+        └── trades-YYYY-MM-DD.csv
+```
+
+A new systemd oneshot + timer — `glitch-ml-export.service` and
+`glitch-ml-export.timer` — runs at 00:10 UTC daily, reads `ml_signals`
+and `ml_trades` via asyncpg, and writes `/opt/ml/live/<date>/*.csv`
+atomically (tempfile + `os.replace`).
+
+The `git_sync.py` module stays in the repo for reference but is no
+longer wired to any systemd unit.
+
 ### Fixed — 2026-04-14 · ProtoOATraderReq/Res wrong payload type
 
 - `executor/ctrader_client.py` declared `PT_TRADER_REQ = 2104` and
