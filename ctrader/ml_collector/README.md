@@ -1,9 +1,9 @@
 # Glitch ML Data Collector
 
-Clean-slate research pipeline for the Glitch Executor trading strategies.
-Runs momentum + mean-reversion bots on a **fresh cTrader demo account**,
-logs every signal + trade + outcome to daily CSV files, and pushes them
-daily to the `glitch-executor-ml-data` GitHub repo under `ml_data_clean/`.
+Clean-slate research pipeline for the trading strategies. Runs momentum
++ mean-reversion bots on **fresh cTrader demo accounts**, logs every
+signal + trade + outcome to daily CSV files, and pushes them to a
+companion ml-data repo under `ml_data_clean/` once a day.
 
 **This is a research data collector, not a trading bot.** It is hard-isolated
 from the production stack: dedicated Linux user, separate venv, separate `.env`,

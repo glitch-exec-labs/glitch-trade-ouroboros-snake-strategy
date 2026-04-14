@@ -55,4 +55,4 @@ journalctl -u glitch-ml-collector.service -f | grep "TRADE "
 psql $ML_DATABASE_URL -c "SELECT COUNT(*) FROM ml_trades WHERE closed_at IS NULL;"
 ```
 
-ML data (CSVs, models) is **not** part of this repo — it lives at `/opt/glitch-ml-data/` on the server and syncs to `glitch-exec-labs/glitch-executor-ml-data` daily.
+ML data (CSVs, models) is **not** part of this repo — it lives in PostgreSQL plus a CSV checkout on the server, which syncs to a private companion repo daily.
