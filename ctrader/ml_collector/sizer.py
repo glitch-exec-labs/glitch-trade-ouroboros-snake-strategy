@@ -139,6 +139,7 @@ def compute_adaptive_lots(
     streak_mult: float,
     price: float,
     spec: SymbolSpec,
+    fx_rate_to_usd: float = 1.0,
 ) -> tuple[float, int]:
     """
     Returns (lots, wire_volume), both clamped to the symbol's [min, max] with step.
@@ -146,19 +147,22 @@ def compute_adaptive_lots(
     wire_volume is the value passed to cTrader directly; lots is the derived
     lot count for logging only.
 
-    Notional model:
-      1 wire unit = (1/100) × base_units_per_lot ... but cTrader treats
-      `volume` as (base_units × 100) so wire_volume per 1 unit of price =
-      wire_volume * (1/100) USD for USD-quoted symbols.
-      target_wire = target_notional × 100 / price
-      This is a good approximation for USD-quoted FX, metals, and indices
-      where lot_size reflects actual base-unit count.
+    Notional model (USD-quoted symbols):
+      target_wire = target_notional_usd × 100 / price
+
+    For non-USD-quoted symbols (e.g. EURJPY, USDJPY, JPN225), the raw price
+    is in the quote currency. Pass `fx_rate_to_usd` = (quote_currency per
+    USD) so the formula produces correct USD-equivalent sizing:
+      target_wire = target_notional_usd × 100 × fx_rate_to_usd / price
+    For JPY-quoted symbols, pass the current USDJPY close (~150). For
+    USD-quoted symbols, leave the default of 1.0.
     """
     target_notional = max(0.0, balance) * max(0.0, notional_pct) * max(0.0, streak_mult)
+    rate = max(0.0, float(fx_rate_to_usd)) or 1.0
     if target_notional <= 0 or price <= 0:
         wire = spec.min_volume
     else:
-        wire = int(round(target_notional * 100.0 / price))
+        wire = int(round(target_notional * 100.0 * rate / price))
 
     step = max(spec.step_volume, 1)
     stepped = max(step, (wire // step) * step)

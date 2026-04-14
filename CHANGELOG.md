@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 2026-04-14 · JPY undersizing + outcome classifier
+
+- **JPY-quoted symbols (EURJPY, USDJPY, GBPJPY, JPN225) were being sized
+  at the minimum volume.** The sizer formula assumed USD-quote currency; raw
+  JPY prices (~187 for EURJPY, ~57,800 for JPN225) produced wire volumes
+  100×+ too small, which then clamped up to `spec.min_volume`.
+  - `compute_adaptive_lots()` now accepts `fx_rate_to_usd` (default 1.0).
+  - `collector._execute_trade` passes the current USDJPY close (via a new
+    shared `latest_close_by_symbol` cache updated by `evaluate_symbol`) for
+    JPY-quoted symbols; defaults to 150.0 if USDJPY hasn't been fetched yet.
+- **All closed trades were being classified as `outcome=UNKNOWN`.**
+  The monitor loop called `fetcher.fetch(symbol, "m15", 2)` for the current
+  price, but `BarFetcher.fetch` returns `None` whenever `len(bars) < 50`,
+  so `current` was always `None`. Now reads from `latest_close_by_symbol`
+  (populated by the main eval loop); falls back to a proper 100-bar fetch
+  on cache miss.
+
 ### Added — 2026-04-14 · ctrader/ track goes live
 
 - **ctrader/ subtree** now holds the live six-snake execution stack previously

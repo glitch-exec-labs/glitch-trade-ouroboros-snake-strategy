@@ -122,6 +122,10 @@ async def run(cfg: Config) -> None:
     }
     spec_cache = SymbolSpecCache()
     balance_cache = BalanceCache(ttl_seconds=60.0)
+    # Shared cache of the most-recent bar_close per symbol. Written by
+    # evaluate_symbol on every fetch; read by monitor_loop (for closure
+    # classification) and by _execute_trade (for JPY→USD conversion).
+    latest_close_by_symbol: Dict[str, float] = {}
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -174,6 +178,7 @@ async def run(cfg: Config) -> None:
         bar_high = float(bars[-1, 2])
         bar_low = float(bars[-1, 3])
         bar_close = float(bars[-1, 4])
+        latest_close_by_symbol[symbol] = bar_close
 
         # 4. Run model
         result = await loop.run_in_executor(
@@ -249,14 +254,20 @@ async def run(cfg: Config) -> None:
             balance = await balance_cache.get(client, bot.account_id)
             win_rate, n_samples = await rolling_win_rate(pool, bot.name, window=10)
             mult = streak_multiplier(win_rate, n_samples)
+            # JPY-quoted symbols need USDJPY conversion so the sizer produces
+            # USD-equivalent exposure instead of JPY-denominated volumes.
+            fx_rate = 1.0
+            if symbol.upper().endswith("JPY") or symbol.upper() == "JPN225":
+                fx_rate = latest_close_by_symbol.get("USDJPY", 150.0) or 150.0
             lots_calc, wire_vol = compute_adaptive_lots(
                 balance=balance, notional_pct=bot.notional_pct,
                 streak_mult=mult, price=bar_close, spec=spec,
+                fx_rate_to_usd=fx_rate,
             )
             logger.info(
-                "sizer %s %s: balance=$%.0f pct=%.3f win=%d/%d mult=%.2f -> lots=%.3f wire=%d",
+                "sizer %s %s: balance=$%.0f pct=%.3f win=%d/%d mult=%.2f fx=%.3f -> lots=%.3f wire=%d",
                 bot.name, symbol, balance, bot.notional_pct, int(win_rate*n_samples), n_samples,
-                mult, lots_calc, wire_vol,
+                mult, fx_rate, lots_calc, wire_vol,
             )
             result = await place_market_order(
                 client=client, spec=spec, account_id=bot.account_id,
@@ -331,14 +342,19 @@ async def run(cfg: Config) -> None:
 
                             for t in trades:
                                 if t["ticket"] and t["ticket"] not in live_tickets:
-                                    # Position closed — fetch current price for classification
-                                    current = None
-                                    try:
-                                        c = fetcher.fetch(t["symbol"], "m15", 2)
-                                        if c is not None and len(c) > 0:
-                                            current = float(c[-1, 4])
-                                    except Exception:
-                                        pass
+                                    # Position closed — use the most recent bar_close
+                                    # cached from the main eval loop. BarFetcher
+                                    # returns None for <50 bars, so we can't just
+                                    # ask for 2 bars on demand here.
+                                    current = latest_close_by_symbol.get(t["symbol"])
+                                    if current is None:
+                                        # Fallback: fetch a full set of bars on miss.
+                                        try:
+                                            c = fetcher.fetch(t["symbol"], "m15", 100)
+                                            if c is not None and len(c) > 0:
+                                                current = float(c[-1, 4])
+                                        except Exception:
+                                            pass
 
                                     exit_price, exit_reason, outcome = _classify_closure(t, current)
                                     direction = 1 if t["side"] == "BUY" else -1
