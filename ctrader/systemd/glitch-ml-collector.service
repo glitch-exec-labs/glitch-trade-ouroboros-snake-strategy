@@ -1,0 +1,22 @@
+[Unit]
+Description=Glitch ML Data Collector (clean cTrader demo)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=glitchml
+Group=glitchml
+WorkingDirectory=/opt/glitch-ouroboros/ctrader
+EnvironmentFile=/opt/glitch-ouroboros/ctrader/ml_collector/.env
+ExecStart=/opt/glitch-ouroboros/ctrader/ml_collector/venv/bin/python -m ml_collector.collector
+Restart=on-failure
+RestartSec=15
+MemoryMax=1G
+CPUQuota=50%
+TasksMax=256
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
