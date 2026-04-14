@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 2026-04-14 · ProtoOAPosition.unrealizedPnl noise
+
+- `CTraderClient._reconcile()` was reading `pos.unrealizedPnl`, a field
+  that does not exist on `ProtoOAPosition` in the cTrader Open API schema
+  (the spec returns only `commission`, `swap`, `usedMargin`, `marginRate`
+  and a few flags — P&L must come from `ProtoOADealListReq`). Every poll
+  cycle logged `get_open_positions failed: Protocol message
+  ProtoOAPosition has no non-repeated field "unrealizedPnl"`. Drop the
+  field and set `profit=0` — callers only need the ticket list for
+  existence checking.
+
+### Changed — 2026-04-14 · Per-timeframe notional_pct defaults
+
+Tiered `notional_pct` by bot timeframe so faster bots don't crowd the
+book with oversized positions. Runtime `.env` values (not committed):
+
+| Bot | TF | notional_pct |
+|-----|-----|--------------|
+| hydra | m1 | 0.1 |
+| viper | m5 | 0.2 |
+| mamba | m15 | 0.3 |
+| taipan | m30 | 0.5 |
+| cobra | h1 | 0.7 |
+| anaconda | h4 | 1.0 |
+
 ### Fixed — 2026-04-14 · JPY undersizing + outcome classifier
 
 - **JPY-quoted symbols (EURJPY, USDJPY, GBPJPY, JPN225) were being sized

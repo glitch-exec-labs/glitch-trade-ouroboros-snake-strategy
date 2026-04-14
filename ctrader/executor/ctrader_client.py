@@ -440,7 +440,10 @@ class CTraderClient:
                 "entry_price": pos.price if pos.HasField("price") else 0,
                 "sl": pos.stopLoss if pos.HasField("stopLoss") else None,
                 "tp": pos.takeProfit if pos.HasField("takeProfit") else None,
-                "profit": pos.unrealizedPnl if pos.HasField("unrealizedPnl") else 0,
+                # NOTE: ProtoOAPosition has no unrealizedPnl field; authoritative
+                # P&L must be fetched via ProtoOADealListReq after close. Return 0
+                # here so callers that only need ticket existence still work.
+                "profit": 0,
             })
         return positions
 
