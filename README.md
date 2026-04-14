@@ -111,6 +111,17 @@ glitch-ouroboros-snake-strategy/
 - no live credentials, state, models, logs, or training data are committed
 - secrets should live outside Git
 
+## Quick Start
+
+1. Read [Architecture](./docs/architecture.md) for the ensemble shape.
+2. Review [Operating Model](./docs/operating-model.md) for Oracle coordination and bot responsibilities.
+3. Compare the current and next platform tracks in [mt5/README.md](./mt5/README.md) and [ctrader/README.md](./ctrader/README.md).
+4. Treat configs in Git as sanitized examples only.
+
+## Contributing
+
+The best public contributions here are documentation clarity, sanitized examples, and platform-portability improvements that keep the ensemble design understandable. Start with [CONTRIBUTING.md](./CONTRIBUTING.md).
+
 ## Documentation
 
 - [Architecture](./docs/architecture.md)
