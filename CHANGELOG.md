@@ -1,0 +1,79 @@
+# Changelog
+
+All notable changes to the Ouroboros Snake Strategy project are logged here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added — 2026-04-14 · ctrader/ track goes live
+
+- **ctrader/ subtree** now holds the live six-snake execution stack previously at
+  `/opt/glitchexecutor/ml_collector/` on the server.
+  - `ctrader/ml_collector/` — 6 bots (hydra m1, viper m5, mamba m15, taipan m30,
+    cobra h1, anaconda h4) each bound to its own Pepperstone $50K demo account.
+  - `ctrader/executor/` — vendored cTrader Open API client.
+  - `ctrader/ensemble/` — vendored price feed + 7 strategy models.
+  - `ctrader/systemd/glitch-ml-collector.service` — deploy unit.
+  - `ctrader/requirements.txt` — pinned to known-working set (ctrader-open-api
+    0.9.0, protobuf 3.19.1, Twisted 21.7.0) to avoid dependency resolver conflict.
+- **Adaptive position sizer** (`ctrader/ml_collector/sizer.py`).
+  Each trade's lot size derives from `balance × notional_pct × streak_mult`:
+  - `balance` fetched live from cTrader (60s cache via `BalanceCache`).
+  - `notional_pct` per-bot config, default `1.0` (100% of equity notional).
+  - `streak_mult` maps rolling win-rate of last 10 closed trades to a
+    `[0.5, 1.5]` multiplier — hot streaks compound faster than equity growth,
+    cold streaks halve size.
+  - Snaps to each symbol's `min_volume`/`step_volume`.
+- **GitHub Actions auto-deploy** (`.github/workflows/deploy-ctrader.yml`).
+  Push to `main` touching `ctrader/**` → SSH → `git pull` →
+  `systemctl restart glitch-ml-collector.service`. No manual steps.
+
+### Fixed — 2026-04-14 · cTrader order placement bugs
+
+Three bugs were preventing MARKET orders from being accepted by Spotware.
+All three fixed in `ctrader/ml_collector/order_placer.py`:
+
+1. **`lots_to_wire` was off by 100×** — the formula was
+   `lots × lot_size / 100` but should be `lots × lot_size`. A config of
+   `lots=1.0` was placing 0.01 lots. Trades now hit the configured size.
+2. **MARKET orders rejected with "SL/TP in absolute values are allowed only
+   for order types: [LIMIT, STOP, STOP_LIMIT]"** — switched from
+   `stopLoss`/`takeProfit` (absolute prices, LIMIT/STOP only) to
+   `relativeStopLoss`/`relativeTakeProfit` (1/100000 price-unit offsets,
+   required for MARKET orders).
+3. **"Relative stop loss has invalid precision" on 3-digit JPY pairs and
+   1-digit indices** — round relative SL/TP to the symbol's precision step
+   (`10 ** (5 - digits)`) so the resulting price lands on a valid tick.
+
+### Migration path (server, one-time)
+
+- Cloned repo to `/opt/glitch-ouroboros` as the `glitchml` user.
+- Seeded `.env` + `state/` from `/opt/glitchexecutor/ml_collector/` (excluded
+  from git via `.gitignore`).
+- Built fresh venv, installed pinned `requirements.txt`.
+- Replaced `/etc/systemd/system/glitch-ml-collector.service` with the unit
+  from `ctrader/systemd/`, `daemon-reload`, `restart`.
+- Added passwordless sudo rules for the deploy user (`sudo -u glitchml git
+  pull` + `sudo systemctl restart glitch-ml-collector.service`).
+- Archived old location at `/opt/glitchexecutor/ml_collector.OLD-20260414`.
+
+### Known issues (follow-up work)
+
+- JPY-quoted pairs (EURJPY, USDJPY, GBPJPY) and JPY-quoted indices (JPN225)
+  are undersized because the sizer uses raw JPY price without USDJPY
+  conversion. Result: ~0.01 lots instead of ~0.4 lots.
+- The position outcome classifier in `position_tracker._classify` is marking
+  all closed trades as `UNKNOWN` instead of `WIN`/`LOSS`, which keeps
+  `streak_mult` pinned at 1.0 (no adaptive streak effect, just plain
+  compounding from live balance).
+
+---
+
+## [0.1.0] — 2026-04-11
+
+Initial public release of the Ouroboros Snake Strategy.
+
+- MT5 bot stack under `mt5/bots/` (anaconda, cobra, hydra, mamba, taipan,
+  viper + oracle coordinator + news guard).
+- Documentation under `docs/` (architecture, operating model, platforms).
+- Empty `ctrader/` placeholder awaiting the cTrader execution track.
