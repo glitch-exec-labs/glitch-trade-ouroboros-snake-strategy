@@ -1,12 +1,12 @@
 """
 Config loader for the ML collector v2.
 
-Loads /opt/glitchexecutor/ml_collector/.env (NEVER the production .env).
+Loads the collector's own .env (NEVER the production platform's .env).
 Parses ML_BOTS JSON (6 bots with per-bot model + timeframe + account),
 ML_SYMBOLS list, and ML_DATABASE_URL for PostgreSQL.
 
-Hardcodes live=False for cTrader and asserts no account matches the
-production live account (46868136).
+Hardcodes live=False for cTrader and asserts no account matches
+ML_FORBIDDEN_ACCOUNT_ID (set in .env to the production live account).
 """
 from __future__ import annotations
 
