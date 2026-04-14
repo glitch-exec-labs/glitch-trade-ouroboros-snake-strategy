@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — 2026-04-14 · ProtoOATraderReq/Res wrong payload type
+
+- `executor/ctrader_client.py` declared `PT_TRADER_REQ = 2104` and
+  `PT_TRADER_RES = 2105`. Those are a different cTrader message
+  entirely. The request went out with the wrong payloadType and the
+  reply was parsed into an empty `ProtoOATraderRes`, so `get_balance`
+  silently returned zeros. Correct constants are 2121 / 2122 — matches
+  what `ml_collector/sizer.py` has always used (which is why adaptive
+  sizing showed real balances while the closure path stored zeros).
+- Effect on stored data: every closed `ml_trades` row up to this fix
+  had `account_balance = 0` and `account_equity = 0`. Future closures
+  will populate correctly.
+
 ### Fixed — 2026-04-14 · ProtoOAPosition.unrealizedPnl noise
 
 - `CTraderClient._reconcile()` was reading `pos.unrealizedPnl`, a field
