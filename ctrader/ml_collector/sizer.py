@@ -75,7 +75,7 @@ async def _fetch_balance(client, account_id: int) -> Optional[float]:
         req = ProtoOATraderReq()
         req.ctidTraderAccountId = account_id
         mid = str(uuid.uuid4())[:8]
-        writer.write(client._build_frame(PT_TRADER_REQ, req.SerializeToString(), mid))  # noqa: SLF001
+        writer.write(client._build_frame(req, mid))  # noqa: SLF001
         await writer.drain()
 
         for _ in range(10):

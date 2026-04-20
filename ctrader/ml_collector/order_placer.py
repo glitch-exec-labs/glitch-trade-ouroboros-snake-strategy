@@ -100,7 +100,7 @@ async def _fetch_spec(client, account_id: int, symbol: str) -> Optional[SymbolSp
         req.ctidTraderAccountId = account_id
         req.symbolId.append(sid)
         mid = str(uuid.uuid4())[:8]
-        writer.write(client._build_frame(PT_SYMBOL_BY_ID_REQ, req.SerializeToString(), mid))  # noqa: SLF001
+        writer.write(client._build_frame(req, mid))  # noqa: SLF001
         await writer.drain()
 
         res_msg = await client._recv_until(reader, [PT_SYMBOL_BY_ID_RES], mid)  # noqa: SLF001
@@ -188,7 +188,7 @@ async def place_market_order(
                 req.relativeTakeProfit = max(prec, (raw // prec) * prec)
 
         mid = str(uuid.uuid4())[:8]
-        writer.write(client._build_frame(PT_NEW_ORDER_REQ, req.SerializeToString(), mid))  # noqa: SLF001
+        writer.write(client._build_frame(req, mid))  # noqa: SLF001
         await writer.drain()
 
         # Read response frames until we see either an execution event or an order error.
