@@ -1,8 +1,8 @@
 <div align="center">
 
-# Ouroboros Snake Strategy
+# Glitch Trade Ouroboros Snake Strategy
 
-Glitch's flagship multi-bot ensemble, combining Oracle coordination with the six-snake execution stack.
+Glitch Trade's flagship multi-bot ensemble, combining Oracle coordination with the six-snake execution stack.
 
 ![Product](https://img.shields.io/badge/product-Flagship%20Ensemble-0f766e?style=for-the-badge)
 ![Family](https://img.shields.io/badge/family-glitch%20trading-111827?style=for-the-badge)
@@ -12,6 +12,8 @@ Glitch's flagship multi-bot ensemble, combining Oracle coordination with the six
 [Glitch Trading Core](https://github.com/glitch-exec-labs/glitch-trading-core) · [Indian King Cobra](https://github.com/glitch-exec-labs/glitch-indian-king-cobra) · [Terciopelo](https://github.com/glitch-exec-labs/glitch-terciopelo)
 
 </div>
+
+> Part of **Glitch Trade**, the trading domain inside **Glitch Executor Labs** — one builder shipping products across **Trade**, **Edge**, and **Grow**.
 
 > Ouroboros Snake Strategy is the flagship coordinated Glitch ensemble: six specialized execution bots, one Oracle layer, and a portfolio-aware risk model designed to keep the stack coherent across any market regime.
 
