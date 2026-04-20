@@ -127,6 +127,113 @@ def resolve_decision(
 _VETO_BOTS: set[str] = set()
 
 
+# ── Pre-trade risk gate ──────────────────────────────────────────────────────────────────────
+#
+# Every bot's trade passes through check_trade_allowed() before order placement.
+# Enforces three overlapping caps from ml_oracle_risk_limits:
+#   1. symbol   — total open lots on one instrument across ALL bots ≤ max_lots
+#   2. bucket   — total open lots in a correlation bucket ≤ max_lots
+#   3. global   — total open lots across the entire portfolio ≤ max_lots
+# A trade is allowed only if it passes all three. On block, the attempt is
+# persisted to ml_oracle_blocks so blocked signals remain labelled data.
+
+
+async def _current_open_lots_by_symbol(pool) -> Dict[str, Tuple[float, int]]:
+    rows = await pool.fetch(
+        "SELECT symbol, COALESCE(SUM(volume_lots),0) AS lots, COUNT(*) AS n "
+        "FROM ml_trades WHERE closed_at IS NULL GROUP BY symbol"
+    )
+    return {r["symbol"]: (float(r["lots"]), int(r["n"])) for r in rows}
+
+
+async def _load_risk_limits(pool) -> Dict[Tuple[str, str], Dict]:
+    rows = await pool.fetch(
+        "SELECT scope_type, scope_key, max_lots, max_trades "
+        "FROM ml_oracle_risk_limits WHERE enabled = TRUE"
+    )
+    return {
+        (r["scope_type"], r["scope_key"]): {
+            "max_lots":   float(r["max_lots"]),
+            "max_trades": int(r["max_trades"]) if r["max_trades"] is not None else None,
+        }
+        for r in rows
+    }
+
+
+async def check_trade_allowed(
+    pool,
+    bot_name: str,
+    symbol: str,
+    side: str,
+    proposed_lots: float,
+    signal_id: Optional[str] = None,
+) -> Tuple[bool, Optional[str], Dict]:
+    """Gate a prospective trade against portfolio-wide risk limits.
+
+    Returns (allowed, reason, detail). When blocked, the attempt is already
+    persisted to ml_oracle_blocks — the caller just skips execution.
+    """
+    limits = await _load_risk_limits(pool)
+    by_sym = await _current_open_lots_by_symbol(pool)
+
+    sym_lots, sym_n = by_sym.get(symbol, (0.0, 0))
+    bucket = CORRELATION_BUCKETS.get(symbol)
+    bucket_lots = sum(l for s, (l, _) in by_sym.items()
+                      if bucket and CORRELATION_BUCKETS.get(s) == bucket)
+    bucket_n    = sum(n for s, (_, n) in by_sym.items()
+                      if bucket and CORRELATION_BUCKETS.get(s) == bucket)
+    global_lots = sum(l for _, (l, _) in by_sym.items())
+    global_n    = sum(n for _, (_, n) in by_sym.items())
+
+    checks = [
+        ("symbol", symbol,               sym_lots,    sym_n),
+        ("bucket", bucket or "__none__", bucket_lots, bucket_n),
+        ("global", "ALL",                global_lots, global_n),
+    ]
+
+    for scope_type, scope_key, cur_lots, cur_n in checks:
+        lim = limits.get((scope_type, scope_key))
+        if not lim:
+            continue
+        would_be = cur_lots + proposed_lots
+        if would_be > lim["max_lots"] + 1e-9:
+            detail = {
+                "scope_type": scope_type, "scope_key": scope_key,
+                "limit_lots": lim["max_lots"], "current_lots": round(cur_lots, 3),
+                "proposed_lots": round(proposed_lots, 3),
+                "would_be_lots": round(would_be, 3),
+            }
+            await _record_block(pool, bot_name, symbol, side, proposed_lots,
+                                f"{scope_type}_lots_cap", detail, signal_id)
+            return False, f"{scope_type}_lots_cap:{scope_key}", detail
+
+        if lim["max_trades"] is not None and cur_n + 1 > lim["max_trades"]:
+            detail = {
+                "scope_type": scope_type, "scope_key": scope_key,
+                "limit_trades": lim["max_trades"], "current_trades": cur_n,
+            }
+            await _record_block(pool, bot_name, symbol, side, proposed_lots,
+                                f"{scope_type}_count_cap", detail, signal_id)
+            return False, f"{scope_type}_count_cap:{scope_key}", detail
+
+    return True, None, {}
+
+
+async def _record_block(
+    pool, bot_name: str, symbol: str, side: str,
+    proposed_lots: float, reason: str, detail: Dict, signal_id: Optional[str],
+) -> None:
+    await pool.execute(
+        """
+        INSERT INTO ml_oracle_blocks
+            (bot_name, symbol, side, proposed_lots, block_reason, block_detail, signal_id)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+        """,
+        bot_name, symbol, side.upper(), float(proposed_lots),
+        reason, json.dumps(detail), signal_id,
+    )
+
+
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 async def _load_weights(pool: asyncpg.Pool) -> Dict[str, BotWeight]:

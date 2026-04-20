@@ -93,6 +93,7 @@ def _derive_sl_tp(bar_close: float, indicators: dict, side: str):
 async def run(cfg: Config) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from .order_placer import SymbolSpecCache, place_market_order
+    from .oracle import check_trade_allowed
     from .sizer import BalanceCache, compute_adaptive_lots, rolling_win_rate, streak_multiplier
     from executor.ctrader_client import CTraderClient
 
@@ -250,6 +251,7 @@ async def run(cfg: Config) -> None:
             return
 
         # Adaptive sizing: live balance × notional_pct × streak_multiplier
+        _proposed_lots_for_gate = None  # filled in by branch below
         if bot.notional_pct and bot.notional_pct > 0:
             balance = await balance_cache.get(client, bot.account_id)
             win_rate, n_samples = await rolling_win_rate(pool, bot.name, window=10)
@@ -269,12 +271,31 @@ async def run(cfg: Config) -> None:
                 bot.name, symbol, balance, bot.notional_pct, int(win_rate*n_samples), n_samples,
                 mult, fx_rate, lots_calc, wire_vol,
             )
+            # Oracle pre-trade risk gate: portfolio-wide caps across all bots.
+            allowed, block_reason, block_detail = await check_trade_allowed(
+                pool, bot.name, symbol, side, lots_calc, signal_id,
+            )
+            if not allowed:
+                logger.info(
+                    "oracle BLOCK %s %s %s lots=%.3f reason=%s detail=%s",
+                    bot.name, symbol, side.upper(), lots_calc, block_reason, block_detail,
+                )
+                return
             result = await place_market_order(
                 client=client, spec=spec, account_id=bot.account_id,
                 symbol=symbol, side=side, lots=lots_calc, sl=sl, tp=tp,
                 entry_price=bar_close, wire_volume=wire_vol,
             )
         else:
+            allowed, block_reason, block_detail = await check_trade_allowed(
+                pool, bot.name, symbol, side, bot.lots, signal_id,
+            )
+            if not allowed:
+                logger.info(
+                    "oracle BLOCK %s %s %s lots=%.3f reason=%s detail=%s",
+                    bot.name, symbol, side.upper(), bot.lots, block_reason, block_detail,
+                )
+                return
             result = await place_market_order(
                 client=client, spec=spec, account_id=bot.account_id,
                 symbol=symbol, side=side, lots=bot.lots, sl=sl, tp=tp,
