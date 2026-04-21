@@ -173,11 +173,29 @@ async def check_trade_allowed(
     Returns (allowed, reason, detail). When blocked, the attempt is already
     persisted to ml_oracle_blocks — the caller just skips execution.
     """
+    # News-embargo gate — runs first so it short-circuits before DB lots query.
+    bucket = CORRELATION_BUCKETS.get(symbol)
+    try:
+        from .news_guard import active_embargoes_for
+        embargoes = await active_embargoes_for(pool, symbol, bucket)
+    except Exception:
+        embargoes = []
+    if embargoes:
+        ev = embargoes[0]
+        detail = {
+            "event_type": ev["event_type"], "impact": ev["impact"],
+            "embargo_until": ev["embargo_until"].isoformat() if ev["embargo_until"] else None,
+            "title": (ev["title"] or "")[:180],
+            "bucket": bucket,
+        }
+        await _record_block(pool, bot_name, symbol, side, proposed_lots,
+                            f"news_embargo:{ev['event_type']}", detail, signal_id)
+        return False, f"news_embargo:{ev['event_type']}", detail
+
     limits = await _load_risk_limits(pool)
     by_sym = await _current_open_lots_by_symbol(pool)
 
     sym_lots, sym_n = by_sym.get(symbol, (0.0, 0))
-    bucket = CORRELATION_BUCKETS.get(symbol)
     bucket_lots = sum(l for s, (l, _) in by_sym.items()
                       if bucket and CORRELATION_BUCKETS.get(s) == bucket)
     bucket_n    = sum(n for s, (_, n) in by_sym.items()
