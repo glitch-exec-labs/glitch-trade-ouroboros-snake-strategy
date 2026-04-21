@@ -94,7 +94,7 @@ async def run(cfg: Config) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from .order_placer import SymbolSpecCache, place_market_order
     from .oracle import check_trade_allowed
-    from .news_guard import news_guard_loop
+    # news_guard runs as an external systemd timer (5h cadence) — not a runtime task
     from .sizer import BalanceCache, compute_adaptive_lots, rolling_win_rate, streak_multiplier
     from executor.ctrader_client import CTraderClient
 
@@ -537,7 +537,6 @@ async def run(cfg: Config) -> None:
     for i, bot in enumerate(cfg.bots):
         tasks.append(bot_loop(bot, offset=i * 10))
     tasks.append(monitor_loop())
-    tasks.append(news_guard_loop(pool))
 
     await asyncio.gather(*tasks)
     await pool.close()

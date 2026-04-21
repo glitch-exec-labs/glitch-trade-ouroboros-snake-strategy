@@ -1,0 +1,18 @@
+[Unit]
+Description=Glitch ML News Cache Refresh (newsdata.io → OpenAI → PostgreSQL)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=glitchml
+Group=glitchml
+WorkingDirectory=/opt/glitch-ouroboros/ctrader
+Environment=PYTHONPATH=/opt/glitch-ouroboros/ctrader
+ExecStart=/opt/glitch-ouroboros/ctrader/ml_collector/venv/bin/python -m ml_collector.news_guard
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+NoNewPrivileges=true
+PrivateTmp=true

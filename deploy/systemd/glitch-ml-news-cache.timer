@@ -1,0 +1,12 @@
+[Unit]
+Description=Glitch ML News Cache — refresh every 5 hours
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5h
+Unit=glitch-ml-news-cache.service
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

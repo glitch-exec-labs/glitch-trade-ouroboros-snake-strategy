@@ -1,27 +1,37 @@
 """
-News-event embargo layer for Ouroboros.
+News-event embargo cache for Ouroboros.
 
-Polls newsdata.io every ML_NEWSGUARD_INTERVAL_SECONDS (default 600 = 10 min),
-matches each article against ml_news_rules (ILIKE patterns), persists matches
-to ml_news_events with embargo_until = published_at + rule.embargo_minutes.
+Architecture: a cron-driven refresher (every ~5h) fetches fresh headlines
+from newsdata.io, asks an LLM to classify each new article for trading
+impact, and persists the classification plus an embargo_until timestamp.
+Oracle.check_trade_allowed reads the cached ml_news_events rows on every
+trade attempt (DB-local, cheap) — it never calls the external news API
+in the hot path.
 
-Oracle.check_trade_allowed consults ml_news_events.embargo_until to gate
-affected symbols/buckets during the embargo window.
+Why cron instead of an in-process loop:
+  - newsdata.io free tier: 200 req/day quota; 5h cadence = ~5 req/day, tiny
+  - Claude classification cost: small (one short prompt per new article)
+  - Most market-moving macro events (CPI, FOMC, NFP) are on a schedule
+    known hours in advance; a 5h refresh window catches them before
+    liquidity repositioning fully starts.
+  - Unscheduled geopolitical shocks get caught at the next refresh
+    (worst-case 5h lag). Trade-off explicitly accepted by the operator.
 
-Requires NEWSDATA_API_KEY in the runtime .env. Free tier has no delay on
-basic headline data; it does not include content body or sentiment (paid).
+Run:
+    python -m ml_collector.news_guard  # bootstrap refresh (systemd timer fires this)
+    python -m ml_collector.news_guard --dry-run  # fetch + classify, don't persist
 
-Run: python -m ml_collector.news_guard
-     (or wire news_guard_loop into collector.py as a sibling asyncio task)
+Oracle's active_embargoes_for() is the hot-path query used on every trade.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import logging
 import os
-import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 import asyncpg
@@ -32,30 +42,60 @@ logger = logging.getLogger("ml_collector.news_guard")
 
 NEWSDATA_BASE = "https://newsdata.io/api/1/latest"
 
-# How often to poll. Free tier has real-time headlines but a 200 req/day
-# quota on the basic plan — 10 min intervals ~ 144 req/day, safe margin.
-NEWSGUARD_INTERVAL_SEC = int(os.environ.get("ML_NEWSGUARD_INTERVAL_SECONDS", "600"))
-
-# Keyword queries — broad enough to catch most macro/geopolitical events.
-# newsdata.io lets us send multiple keywords in one call; we rotate through
-# these on each poll to cover more ground without burning the quota.
-NEWSGUARD_QUERIES = [
-    "FOMC OR CPI OR NFP OR Fed",
-    "ECB OR BOE OR BOJ OR \"rate decision\"",
-    "war OR invasion OR sanctions OR OPEC",
-    "inflation OR unemployment OR GDP",
+# Queries rotated across refreshes to cover different event categories.
+# Free tier returns ~10 articles per call; 4 queries = ~40 articles per refresh.
+NEWSDATA_QUERIES = [
+    "FOMC OR CPI OR NFP OR Fed OR Powell",
+    "ECB OR BOE OR BOJ OR \"rate decision\" OR Lagarde",
+    "war OR invasion OR sanctions OR OPEC OR \"oil supply\"",
+    "inflation OR unemployment OR GDP OR recession",
 ]
 
-_q_cursor = 0  # rotates through NEWSGUARD_QUERIES
+# Claude model — use Haiku for cost. One short prompt per new article.
+CLASSIFIER_MODEL = os.environ.get("ML_NEWS_CLASSIFIER_MODEL", "gpt-4o-mini")
+MAX_CLASSIFY_PER_RUN = int(os.environ.get("ML_NEWS_MAX_CLASSIFY_PER_RUN", "40"))
+
+# The correlation buckets the classifier may reference. Must match
+# oracle.CORRELATION_BUCKETS.
+ALLOWED_BUCKETS = [
+    "USD_MAJOR", "JPY_CROSS", "METALS", "ENERGY",
+    "EQUITY_US", "EQUITY_EU", "EQUITY_AS",
+]
+
+CLASSIFIER_SYSTEM = """You are a risk classifier for a systematic trading system that runs forex, metals, energy, and equity-index strategies.
+
+Given a news headline and description, decide whether the article represents a MARKET-MOVING event that should temporarily block new trades on affected asset classes. Return ONLY a single JSON object with this exact shape:
+
+{
+  "impact": "high" | "medium" | "low" | "none",
+  "event_type": "<short snake_case tag, e.g. 'us_cpi', 'fomc', 'ecb_rate', 'oil_supply_shock', 'geopolitical', 'earnings', 'noise'>",
+  "affected_buckets": [<subset of: "USD_MAJOR", "JPY_CROSS", "METALS", "ENERGY", "EQUITY_US", "EQUITY_EU", "EQUITY_AS">],
+  "affected_symbols": [<optional list of specific tickers like "EURUSD", "XAUUSD", "US500">],
+  "embargo_minutes": <integer, how long after the event publication to pause affected trades>,
+  "reasoning": "<one sentence explaining your classification>"
+}
+
+Guidance:
+- "high" impact (embargo 60-180 min): central bank rate decisions, CPI/PCE prints, NFP, GDP, war/invasion headlines, major OPEC decisions, surprise rate moves, market-crash headlines.
+- "medium" impact (embargo 30-60 min): inflation/unemployment commentary, minor central bank speeches, PMI, retail sales, sanctions news, commodity supply concerns.
+- "low" impact (embargo 10-30 min): individual earnings reports, sector news, secondary data.
+- "none" (embargo 0): articles that are reporting OLD news, opinion pieces, feature stories, lifestyle/sports, sector-neutral corporate news, or articles where the keyword match is coincidental (e.g. "Warwickshire" for "war").
+
+Only include buckets that are actually affected. A US CPI print affects USD_MAJOR, METALS, EQUITY_US, JPY_CROSS. An ECB decision affects USD_MAJOR, EQUITY_EU, JPY_CROSS. Oil-supply news affects ENERGY and often EQUITY_US.
+
+If the article is clearly irrelevant to market trading (lifestyle, sports, obituaries, coincidental keyword matches), return impact: "none" with empty buckets and embargo_minutes: 0.
+
+Output ONLY the JSON. No markdown, no prose before or after."""
 
 
-# ── newsdata.io client ────────────────────────────────────────────────────────
+# ── newsdata.io fetch ─────────────────────────────────────────────────────────
 
 async def _fetch_latest(session: aiohttp.ClientSession, apikey: str, q: str,
                         language: str = "en", size: int = 10) -> List[Dict[str, Any]]:
     params = {"apikey": apikey, "q": q, "language": language, "size": str(size)}
     try:
-        async with session.get(NEWSDATA_BASE, params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
+        async with session.get(NEWSDATA_BASE, params=params,
+                               timeout=aiohttp.ClientTimeout(total=20)) as r:
             data = await r.json()
             if data.get("status") != "success":
                 logger.warning("newsdata.io non-success: %s", data.get("message") or data)
@@ -66,55 +106,51 @@ async def _fetch_latest(session: aiohttp.ClientSession, apikey: str, q: str,
         return []
 
 
-# ── Rule matcher ──────────────────────────────────────────────────────────────
+# ── Claude classifier ─────────────────────────────────────────────────────────
 
-def _ilike_to_regex(pattern: str) -> re.Pattern:
-    """Convert a '%term1%term2%' ILIKE-style pattern to a word-boundary regex.
-
-    Uses \b word boundaries around each term so short keywords like "war" or
-    "Fed" do not substring-match inside "Warwickshire" or "Federer". Terms
-    are joined by .* so '%Fed%rate%' requires both tokens in order but with
-    any text between.
-    """
-    terms = [t for t in pattern.split("%") if t.strip()]
-    if not terms:
-        return re.compile("(?!)")  # never matches
-    parts = [rf"\b{re.escape(t)}\b" for t in terms]
-    return re.compile(".*".join(parts), re.IGNORECASE | re.DOTALL)
-
-
-async def _load_rules(pool: asyncpg.Pool) -> List[Dict[str, Any]]:
-    rows = await pool.fetch(
-        "SELECT id, rule_name, pattern, event_type, impact, embargo_minutes, "
-        "       affected_buckets, affected_symbols "
-        "FROM ml_news_rules WHERE enabled = TRUE ORDER BY id"
+def _classify_article(client, title: str, description: str) -> Optional[Dict[str, Any]]:
+    """Ask the LLM to classify one article. Returns None on error."""
+    user_msg = (
+        f"TITLE: {(title or '').strip()[:400]}\n\n"
+        f"DESCRIPTION: {(description or '').strip()[:800]}"
     )
-    out = []
-    for r in rows:
-        out.append({
-            "id": int(r["id"]), "rule_name": r["rule_name"],
-            "regex": _ilike_to_regex(r["pattern"]),
-            "event_type": r["event_type"], "impact": r["impact"],
-            "embargo_minutes": int(r["embargo_minutes"]),
-            "affected_buckets": list(r["affected_buckets"] or []),
-            "affected_symbols": list(r["affected_symbols"] or []),
-        })
-    return out
-
-
-def _match_rule(rules: List[Dict], title: str, description: str) -> Optional[Dict]:
-    """Return first matching rule, or None. Impact rank high > medium > low."""
-    haystack = f"{title or ''} {description or ''}"
-    best = None
-    for r in rules:
-        if r["regex"].search(haystack):
-            if best is None or _impact_rank(r["impact"]) > _impact_rank(best["impact"]):
-                best = r
-    return best
-
-
-def _impact_rank(impact: str) -> int:
-    return {"high": 3, "medium": 2, "low": 1}.get(impact, 0)
+    try:
+        resp = client.chat.completions.create(
+            model=CLASSIFIER_MODEL,
+            max_tokens=512,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": CLASSIFIER_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        # Strip markdown fences if the model wrapped its output
+        if text.startswith("```"):
+            text = text.split("```", 2)[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip().rsplit("```", 1)[0].strip()
+        obj = json.loads(text)
+        # Validate shape
+        impact = obj.get("impact", "none")
+        if impact not in ("high", "medium", "low", "none"):
+            impact = "none"
+        buckets = [b for b in obj.get("affected_buckets") or [] if b in ALLOWED_BUCKETS]
+        symbols = [s for s in obj.get("affected_symbols") or [] if isinstance(s, str)]
+        em = int(obj.get("embargo_minutes") or 0)
+        return {
+            "impact": impact,
+            "event_type": str(obj.get("event_type") or "unclassified")[:40],
+            "affected_buckets": buckets,
+            "affected_symbols": symbols[:20],
+            "embargo_minutes": max(0, min(em, 480)),  # clamp to [0, 8h]
+            "reasoning": str(obj.get("reasoning") or "")[:300],
+        }
+    except Exception:
+        logger.exception("classifier error")
+        return None
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -123,7 +159,6 @@ def _parse_pub_date(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
     try:
-        # "2026-04-20 15:37:13" (newsdata.io always UTC)
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except Exception:
         try:
@@ -132,74 +167,72 @@ def _parse_pub_date(s: Optional[str]) -> Optional[datetime]:
             return None
 
 
-async def _persist_article(pool: asyncpg.Pool, article: Dict[str, Any],
-                           rule: Optional[Dict]) -> bool:
-    """Insert with ON CONFLICT DO NOTHING. Returns True if a new row landed."""
+async def _already_cached(pool: asyncpg.Pool, article_id: str) -> bool:
+    row = await pool.fetchrow(
+        "SELECT 1 FROM ml_news_events WHERE article_id = $1", article_id
+    )
+    return row is not None
+
+
+async def _persist(pool: asyncpg.Pool, article: Dict[str, Any],
+                   classification: Optional[Dict[str, Any]]) -> bool:
     article_id = article.get("article_id")
     if not article_id:
         return False
-
     pub = _parse_pub_date(article.get("pubDate"))
+    now = datetime.now(timezone.utc)
     embargo_until = None
     event_type = impact = None
     buckets: List[str] = []
     symbols: List[str] = []
-    rule_id = None
+    if classification and classification["impact"] != "none" and classification["embargo_minutes"] > 0:
+        impact = classification["impact"]
+        event_type = classification["event_type"]
+        buckets = classification["affected_buckets"]
+        symbols = classification["affected_symbols"]
+        base = pub or now
+        cand = base + timedelta(minutes=classification["embargo_minutes"])
+        if cand > now:
+            embargo_until = cand
+    elif classification:
+        # Record "none" classification for auditability — impact column stores it.
+        impact = "none"
+        event_type = classification["event_type"]
 
-    if rule is not None:
-        rule_id     = rule["id"]
-        event_type  = rule["event_type"]
-        impact      = rule["impact"]
-        buckets     = rule["affected_buckets"]
-        symbols     = rule["affected_symbols"]
-        base_time   = pub or datetime.now(timezone.utc)
-        candidate = base_time + timedelta(minutes=rule["embargo_minutes"])
-        # Only set an embargo window if it\'s actually in the future.
-        # Back-dated articles (hours-old pubDate) are still recorded for
-        # historical context but should not block current trades.
-        if candidate > datetime.now(timezone.utc):
-            embargo_until = candidate
-
-    try:
-        row = await pool.fetchrow(
-            """
-            INSERT INTO ml_news_events (
-                article_id, title, description, link, source, published_at,
-                category, country,
-                matched_rule_id, event_type, impact, affected_buckets, affected_symbols,
-                embargo_until
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-            ON CONFLICT (article_id) DO NOTHING
-            RETURNING id
-            """,
-            article_id,
-            (article.get("title") or "")[:4000],
-            (article.get("description") or "")[:4000],
-            article.get("link"),
-            article.get("source_name") or article.get("source_id"),
-            pub,
-            article.get("category") or [],
-            article.get("country") or [],
-            rule_id, event_type, impact, buckets, symbols,
-            embargo_until,
-        )
-        return row is not None
-    except Exception:
-        logger.exception("persist failed for article_id=%s", article_id)
-        return False
+    row = await pool.fetchrow(
+        """
+        INSERT INTO ml_news_events (
+            article_id, title, description, link, source, published_at,
+            category, country,
+            event_type, impact, affected_buckets, affected_symbols,
+            embargo_until
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT (article_id) DO NOTHING
+        RETURNING id
+        """,
+        article_id,
+        (article.get("title") or "")[:4000],
+        (article.get("description") or "")[:4000],
+        article.get("link"),
+        article.get("source_name") or article.get("source_id"),
+        pub,
+        article.get("category") or [],
+        article.get("country") or [],
+        event_type, impact, buckets, symbols,
+        embargo_until,
+    )
+    return row is not None
 
 
-# ── Public gate helper — called by Oracle ─────────────────────────────────────
+# ── Oracle hot-path helper (DB-only, no external API) ─────────────────────────
 
-async def active_embargoes_for(pool: asyncpg.Pool, symbol: str, bucket: Optional[str]
-                               ) -> List[Dict[str, Any]]:
-    """
-    Return currently-active embargo events that affect this symbol or bucket.
-    Used by oracle.check_trade_allowed to ABSTAIN during high-impact windows.
-    """
+async def active_embargoes_for(pool: asyncpg.Pool, symbol: str,
+                               bucket: Optional[str]) -> List[Dict[str, Any]]:
+    """Return currently-active embargoes affecting this symbol or bucket."""
     rows = await pool.fetch(
         """
-        SELECT id, event_type, impact, embargo_until, title, affected_buckets, affected_symbols
+        SELECT id, event_type, impact, embargo_until, title,
+               affected_buckets, affected_symbols
         FROM ml_news_events
         WHERE embargo_until IS NOT NULL
           AND embargo_until > NOW()
@@ -216,56 +249,93 @@ async def active_embargoes_for(pool: asyncpg.Pool, symbol: str, bucket: Optional
     return [dict(r) for r in rows]
 
 
-# ── Loop ──────────────────────────────────────────────────────────────────────
+# ── Refresh-cache entrypoint (cron calls this) ────────────────────────────────
 
-async def news_guard_loop(pool: asyncpg.Pool) -> None:
-    global _q_cursor
+async def refresh_cache(dry_run: bool = False) -> Dict[str, int]:
+    cfg = get_config()
     apikey = os.environ.get("NEWSDATA_API_KEY", "").strip()
     if not apikey:
-        logger.error("NEWSDATA_API_KEY not set in .env — news_guard disabled")
-        return
+        raise RuntimeError("NEWSDATA_API_KEY missing from .env")
 
-    logger.info("news_guard started (interval=%ds, %d queries rotating)",
-                NEWSGUARD_INTERVAL_SEC, len(NEWSGUARD_QUERIES))
+    # OpenAI client (picks up OPENAI_API_KEY from env)
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise RuntimeError("openai SDK not installed") from e
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY missing from .env")
+    client = OpenAI()
 
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                rules = await _load_rules(pool)
-                q = NEWSGUARD_QUERIES[_q_cursor % len(NEWSGUARD_QUERIES)]
-                _q_cursor += 1
+    totals = {"fetched": 0, "new_articles": 0, "classified": 0,
+              "embargoed": 0, "skipped_existing": 0, "classify_errors": 0}
+    pool = await asyncpg.create_pool(cfg.db_dsn, min_size=1, max_size=4)
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Fetch all queries, deduplicate by article_id across the batch
+            all_articles: List[Dict[str, Any]] = []
+            seen_ids = set()
+            for q in NEWSDATA_QUERIES:
+                arts = await _fetch_latest(session, apikey, q, size=10)
+                for a in arts:
+                    aid = a.get("article_id")
+                    if aid and aid not in seen_ids:
+                        seen_ids.add(aid)
+                        all_articles.append(a)
+                logger.info("fetched %d articles for q=%r", len(arts), q)
+            totals["fetched"] = len(all_articles)
 
-                articles = await _fetch_latest(session, apikey, q, size=10)
-                new_rows = matched = 0
-                for art in articles:
-                    rule = _match_rule(rules, art.get("title") or "", art.get("description") or "")
-                    if await _persist_article(pool, art, rule):
-                        new_rows += 1
-                        if rule:
-                            matched += 1
-                            logger.warning(
-                                "NEWS EMBARGO %s impact=%s until=%s — %s",
-                                rule["event_type"], rule["impact"],
-                                (_parse_pub_date(art.get("pubDate")) or datetime.now(timezone.utc)
-                                 ) + timedelta(minutes=rule["embargo_minutes"]),
-                                (art.get("title") or "")[:120],
-                            )
-                logger.info("news_guard cycle q=%r new=%d matched=%d", q, new_rows, matched)
+            # Filter to unseen articles only (skip re-classifying cached ones)
+            new_articles = []
+            for a in all_articles:
+                if await _already_cached(pool, a["article_id"]):
+                    totals["skipped_existing"] += 1
+                else:
+                    new_articles.append(a)
+            totals["new_articles"] = len(new_articles)
 
-            except Exception:
-                logger.exception("news_guard_loop iteration failed")
+            # Cap classification calls
+            if len(new_articles) > MAX_CLASSIFY_PER_RUN:
+                logger.warning("capping classify batch: %d new -> %d",
+                               len(new_articles), MAX_CLASSIFY_PER_RUN)
+                new_articles = new_articles[:MAX_CLASSIFY_PER_RUN]
 
-            await asyncio.sleep(NEWSGUARD_INTERVAL_SEC)
+            # Classify + persist
+            for a in new_articles:
+                classification = await asyncio.to_thread(
+                    _classify_article, client,
+                    a.get("title") or "", a.get("description") or "",
+                )
+                if classification is None:
+                    totals["classify_errors"] += 1
+                    continue
+                totals["classified"] += 1
+                if classification["impact"] in ("high", "medium") and classification["embargo_minutes"] > 0:
+                    totals["embargoed"] += 1
+                    logger.warning(
+                        "NEWS CLASSIFIED impact=%s type=%s buckets=%s embargo=%dm title=%r",
+                        classification["impact"], classification["event_type"],
+                        classification["affected_buckets"], classification["embargo_minutes"],
+                        (a.get("title") or "")[:100],
+                    )
+
+                if not dry_run:
+                    await _persist(pool, a, classification)
+
+        logger.info("refresh_cache done: %s", totals)
+        return totals
+    finally:
+        await pool.close()
 
 
 async def main() -> None:
+    ap = argparse.ArgumentParser(description="Refresh news-embargo cache via newsdata.io + Claude classifier.")
+    ap.add_argument("--dry-run", action="store_true", help="Fetch + classify without persisting.")
+    args = ap.parse_args()
+
     cfg = get_config()
     configure_logging(cfg)
-    pool = await asyncpg.create_pool(cfg.db_dsn, min_size=1, max_size=4)
-    try:
-        await news_guard_loop(pool)
-    finally:
-        await pool.close()
+    totals = await refresh_cache(dry_run=args.dry_run)
+    print(json.dumps(totals, indent=2))
 
 
 if __name__ == "__main__":
