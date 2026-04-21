@@ -387,7 +387,16 @@ class CTraderClient:
 
             return await self._session(fetch)
         except Exception as e:
-            logger.error("get_deals_by_position(%s) failed: %s", position_id, e)
+            # INCORRECT_BOUNDARIES / server-side window rejections are recoverable —
+            # monitor_loop falls back to bar-price estimation for exit_price + PnL.
+            # Log at DEBUG so ops logs stay readable; real failures still surface
+            # via the WARNING for "unexpected_deal_history_error" below.
+            msg = str(e)
+            if "INCORRECT_BOUNDARIES" in msg or "ErrorCode 60" in msg:
+                logger.debug("get_deals_by_position(%s) window rejected: %s", position_id, msg)
+            else:
+                logger.warning("get_deals_by_position(%s) unexpected_deal_history_error: %s",
+                               position_id, msg)
             return []
 
     # ── Internal helpers ──────────────────────────────────────────────────────
