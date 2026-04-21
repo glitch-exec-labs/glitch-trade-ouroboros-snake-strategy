@@ -1,30 +1,49 @@
-# SECURITY NOTE — read before reactivating
+# SECURITY NOTE
 
-**Date:** 2026-04-17
+**Last updated:** 2026-04-21
 
-This project is currently dormant. Before picking it back up, you MUST create a fresh Brave Search API key. Do NOT reuse the value that used to live in this repo — it was leaked publicly and is compromised.
+## Leaked Brave Search API key — dead, no action needed
 
-## What was leaked
+A `BRAVE_API_KEY` literal was previously hardcoded in `mt5/bots/news_guard.py`
+and committed to this public repo. It was removed from HEAD in commit
+`69623cd` (2026-04-17) and the Brave Search account itself has since been
+**suspended** — the key is a dead credential.
 
-| Secret | Where it used to live | Status |
+| Secret | Where it lived | Current status |
 |---|---|---|
-| Brave Search `BRAVE_API_KEY` | `mt5/bots/news_guard.py` (HEAD) | Removed from HEAD. Still visible in git history. **Treat as compromised.** |
+| Brave Search `BRAVE_API_KEY` | `mt5/bots/news_guard.py` (pre-`69623cd`) | **Dead** — Brave account suspended. Key literal remains in git history but is unusable. |
 
-## Reactivation checklist
+## Why we did NOT rewrite history
 
-1. Revoke the old Brave key at https://api.search.brave.com/app/keys (if not already).
-2. Create a fresh key.
-3. Put it in a `.env` (gitignored) — never back in source.
-4. Required env var for `news_guard.py`: `BRAVE_API_KEY`.
+`git filter-repo` + force-push would scrub the key literal from historical
+commits, but:
 
-## Optional: scrub git history
+- The credential is already dead, so the literal has no value to anyone who
+  finds it.
+- Force-pushing breaks every existing clone and fork of a public repo — the
+  SHAs change, bookmarked commits stop resolving, and downstream consumers
+  must re-clone.
+- GitHub caches historical objects for up to 90 days regardless.
 
-The old key is still visible in the commit history of this public repo. Rotation is what saves you, not the scrub — but if you want to remove it from history too, run:
+Rotation/revocation is what actually closes an API-key leak. In this case
+the account was suspended, so the leak is closed. Rewriting history would
+be cosmetic at the cost of real disruption.
 
-```bash
-pip install git-filter-repo
-git filter-repo --replace-text <(echo 'BSA6fJYRU5hT2r55TvOgAxmvMfmcbbP==>***REMOVED***')
-git push --force origin --all --tags
-```
+## If the Brave integration is ever revived
 
-Then open a GitHub Support ticket asking them to purge cached views.
+1. Create a fresh Brave Search account and key at
+   <https://api.search.brave.com/app/keys>.
+2. Put the new key in a `.env` file outside the repo (`.env` is gitignored).
+3. Set `BRAVE_API_KEY` in the environment that runs `news_guard.py`.
+4. Do NOT copy any value from git history into a live configuration.
+
+## General secret hygiene in this repo
+
+- `.env` files are gitignored and have never been committed.
+- `ctrader/ensemble/models/*.params.json` is gitignored — production model
+  tuning lives only on the deployment server. Only `*.params.example.json`
+  (neutral demo values) is tracked.
+- OAuth access tokens and broker credentials live in runtime `.env` only;
+  no credential has ever been committed besides the now-dead Brave key.
+
+Responsible-disclosure contact: `support@glitchexecutor.com`.
