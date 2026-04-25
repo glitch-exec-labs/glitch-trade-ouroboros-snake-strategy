@@ -54,6 +54,10 @@ CORRELATION_BUCKETS: Dict[str, str] = {
     "US500":  "EQUITY_US", "US100":  "EQUITY_US",
     "GER40":  "EQUITY_EU", "UK100":  "EQUITY_EU",
     "JPN225": "EQUITY_AS",
+    # Crypto trades 24/7 — useful for weekend data collection.
+    # Volatility regime is much higher than forex; risk caps are tighter
+    # in absolute terms via ml_oracle_risk_limits.
+    "BTCUSD": "CRYPTO",    "ETHUSD": "CRYPTO",    "SOLUSD": "CRYPTO",
 }
 
 
