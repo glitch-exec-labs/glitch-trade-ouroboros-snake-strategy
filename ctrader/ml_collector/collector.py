@@ -65,7 +65,15 @@ class PidLock:
 
 # ─── Market-hours gate ──────────────────────────────────────────────────
 
-def market_is_open(now: datetime) -> bool:
+# Symbols whose market is 24/7 — bypass the forex weekend/Friday-close filter.
+# Kept here as a small literal set so collector.py does not back-import oracle.
+_TWENTY_FOUR_SEVEN: set[str] = {"BTCUSD", "ETHUSD", "SOLUSD"}
+
+
+def market_is_open(now: datetime, symbol: str | None = None) -> bool:
+    # Crypto trades 24/7 — accept regardless of weekday/time.
+    if symbol and symbol.upper() in _TWENTY_FOUR_SEVEN:
+        return True
     wd = now.weekday()
     t = now.time()
     if wd == 5:  # Saturday
@@ -221,7 +229,7 @@ async def run(cfg: Config) -> None:
         # 6. Maybe trade
         if vote in ("BUY", "SELL") and confidence >= bot.min_confidence:
             now = datetime.now(timezone.utc)
-            if not market_is_open(now):
+            if not market_is_open(now, symbol):
                 logger.debug("%s/%s would trade %s but market closed", bot.name, symbol, vote)
             elif await db.has_open_trade(bot.name, symbol):
                 logger.debug("%s/%s already has open trade, skipping", bot.name, symbol)
