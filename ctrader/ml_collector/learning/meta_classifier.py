@@ -92,13 +92,27 @@ def fetch_training_set(bot_name: str) -> pd.DataFrame:
             t.id, t.bot_name, t.symbol, t.timeframe, t.side,
             t.entry_price, t.signal_confidence,
             t.signal_indicators, t.outcome, t.pnl,
+            CASE WHEN t.exit_reason = 'broker_closed_stale' THEN 0 ELSE 1 END
+                AS label_quality,
+            EXTRACT(EPOCH FROM (t.closed_at - t.opened_at))/60 AS held_minutes,
             EXTRACT(HOUR   FROM t.opened_at AT TIME ZONE 'UTC')::int AS hour_utc,
             EXTRACT(DOW    FROM t.opened_at AT TIME ZONE 'UTC')::int AS day_of_week
         FROM ml_trades t
         WHERE t.bot_name = %s
           AND t.outcome IN ('WIN', 'LOSS')
           AND t.signal_indicators IS NOT NULL
+          -- Exclude rows with synthetic / placeholder outcomes:
           AND COALESCE((t.signal_indicators->>'orphan')::boolean, false) = false
+          -- Filter out artifact rows by their OBSERVABLE properties (placeholder
+          -- exit_price + zero-second hold), NOT by exit_reason which is too coarse:
+          -- many legitimate WIN/LOSS trades carry exit_reason='manual_or_unknown'
+          -- while their outcome was correctly bar-price-labeled.
+          --
+          -- Exclude closures with no fill price recorded (placeholders / debug runs):
+          AND t.exit_price IS NOT NULL AND t.exit_price > 0
+          -- Exclude near-instant closures (< 60 sec held). On bots running M5+
+          -- timeframes, a sub-minute closure can only be an artifact.
+          AND EXTRACT(EPOCH FROM (t.closed_at - t.opened_at)) >= 60
         ORDER BY t.opened_at
     """
     with psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
@@ -144,6 +158,10 @@ def explode_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     feats["hour_utc"] = df["hour_utc"].astype(float).values
     feats["day_of_week"] = df["day_of_week"].astype(float).values
     feats["is_buy"] = (df["side"] == "BUY").astype(int).values
+    # label_quality: 1 = authoritative deal-history label, 0 = bar-price fallback.
+    # Letting the model see this means it can downweight noisy training rows.
+    if "label_quality" in df.columns:
+        feats["label_quality"] = df["label_quality"].astype(float).values
 
     feature_names = list(feats.columns)
     return feats, feature_names
