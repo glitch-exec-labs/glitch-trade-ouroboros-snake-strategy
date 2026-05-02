@@ -43,6 +43,14 @@ class BotConfig:
     min_confidence: float      # signal threshold
     max_concurrent: int        # max open trades per symbol
     bar_count: int             # how many bars to fetch
+    # Per-bot symbol whitelist. None / [] / missing → fall back to global ML_SYMBOLS.
+    # Use this to restrict each bot to the asset classes it's structurally suited for
+    # (e.g. taipan/session_analyst → indices + majors; cobra/trend_follower → trending pairs).
+    symbols: tuple = ()
+    # Per-(bot, symbol) overrides. Symbol → override value. Falls back to the bot-wide
+    # value if symbol not present. Unconventional dataclass typing keeps frozen=True happy.
+    min_confidence_per_symbol: tuple = ()    # ((sym, value), ...)
+    notional_pct_per_symbol:   tuple = ()    # ((sym, value), ...)
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,19 @@ def _parse_bots(raw: str) -> List[BotConfig]:
     out: List[BotConfig] = []
     for i, it in enumerate(items):
         try:
+            # Parse optional per-bot symbol whitelist
+            sym_list = it.get("symbols")
+            if sym_list and isinstance(sym_list, list):
+                symbols_t = tuple(str(s).upper() for s in sym_list if str(s).strip())
+            else:
+                symbols_t = ()
+
+            # Parse optional per-symbol overrides (objects {"EURUSD": 0.7, "BTCUSD": 0.85})
+            def _to_pairs(d):
+                if not isinstance(d, dict):
+                    return ()
+                return tuple((str(k).upper(), float(v)) for k, v in d.items())
+
             bot = BotConfig(
                 name=str(it["name"]),
                 model=str(it["model"]),
@@ -98,6 +119,9 @@ def _parse_bots(raw: str) -> List[BotConfig]:
                 min_confidence=float(it["min_confidence"]),
                 max_concurrent=int(it.get("max_concurrent", 1)),
                 bar_count=int(it.get("bar_count", 200)),
+                symbols=symbols_t,
+                min_confidence_per_symbol=_to_pairs(it.get("min_confidence_per_symbol", {})),
+                notional_pct_per_symbol=_to_pairs(it.get("notional_pct_per_symbol", {})),
             )
             forbidden = _forbidden_live_account_id()
             if forbidden and bot.account_id == forbidden:

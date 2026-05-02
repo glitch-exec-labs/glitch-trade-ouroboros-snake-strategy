@@ -147,13 +147,32 @@ async def run(cfg: Config) -> None:
 
     # ── Bot loop (one per timeframe group, staggered) ──────────────────
 
+    # Per-(bot, symbol) override lookup: returns the bot-wide value when the
+    # symbol does not have a per-symbol entry. Cheap linear scan over the
+    # tiny tuple — fine at our trade-attempt cadence.
+    def _override(pairs, symbol: str, default):
+        s = symbol.upper()
+        for k, v in pairs:
+            if k == s:
+                return v
+        return default
+
     async def bot_loop(bot: BotConfig, offset: int) -> None:
         if offset > 0:
             await asyncio.sleep(offset)
 
+        # Per-bot symbol whitelist falls back to global ML_SYMBOLS if empty.
+        # Logged once at start so the operator can see exactly which symbols
+        # this bot will iterate.
+        bot_symbols = list(bot.symbols) if bot.symbols else list(cfg.symbols)
+        logger.info("%s/%s iterating %d symbols: %s",
+                    bot.name, bot.timeframe, len(bot_symbols),
+                    ", ".join(bot_symbols) if len(bot_symbols) <= 10 else
+                    ", ".join(bot_symbols[:10]) + ", …")
+
         while not stop.is_set():
             t0 = time.time()
-            for symbol in cfg.symbols:
+            for symbol in bot_symbols:
                 if stop.is_set():
                     break
                 try:
@@ -227,7 +246,8 @@ async def run(cfg: Config) -> None:
             return  # deduped
 
         # 6. Maybe trade
-        if vote in ("BUY", "SELL") and confidence >= bot.min_confidence:
+        eff_min_conf = _override(bot.min_confidence_per_symbol, symbol, bot.min_confidence)
+        if vote in ("BUY", "SELL") and confidence >= eff_min_conf:
             now = datetime.now(timezone.utc)
             if not market_is_open(now, symbol):
                 logger.debug("%s/%s would trade %s but market closed", bot.name, symbol, vote)
@@ -261,7 +281,8 @@ async def run(cfg: Config) -> None:
 
         # Adaptive sizing: live balance × notional_pct × streak_multiplier
         _proposed_lots_for_gate = None  # filled in by branch below
-        if bot.notional_pct and bot.notional_pct > 0:
+        eff_notional_pct = _override(bot.notional_pct_per_symbol, symbol, bot.notional_pct)
+        if eff_notional_pct and eff_notional_pct > 0:
             balance = await balance_cache.get(client, bot.account_id)
             win_rate, n_samples = await rolling_win_rate(pool, bot.name, window=10)
             mult = streak_multiplier(win_rate, n_samples)
@@ -271,13 +292,13 @@ async def run(cfg: Config) -> None:
             if symbol.upper().endswith("JPY") or symbol.upper() == "JPN225":
                 fx_rate = latest_close_by_symbol.get("USDJPY", 150.0) or 150.0
             lots_calc, wire_vol = compute_adaptive_lots(
-                balance=balance, notional_pct=bot.notional_pct,
+                balance=balance, notional_pct=eff_notional_pct,
                 streak_mult=mult, price=bar_close, spec=spec,
                 fx_rate_to_usd=fx_rate,
             )
             logger.info(
                 "sizer %s %s: balance=$%.0f pct=%.3f win=%d/%d mult=%.2f fx=%.3f -> lots=%.3f wire=%d",
-                bot.name, symbol, balance, bot.notional_pct, int(win_rate*n_samples), n_samples,
+                bot.name, symbol, balance, eff_notional_pct, int(win_rate*n_samples), n_samples,
                 mult, fx_rate, lots_calc, wire_vol,
             )
             # Oracle pre-trade risk gate: portfolio-wide caps across all bots.
